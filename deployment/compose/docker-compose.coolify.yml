@@ -1,0 +1,144 @@
+version: "3.4"
+
+################################################################################
+# Declare any named volumes you'll need for persistence (server data, dredd, db)
+################################################################################
+
+volumes:
+  server:
+  dredd:
+  postgres:
+
+################################################################################
+# 1. SERVER: the main Semaphore API + UI engine
+#
+#    - Builds from deployment/docker/server/Dockerfile
+#    - Persists data under the "server" volume at /var/lib/semaphore
+#    - Injects all required SEMAPHORE_* environment variables
+#    - Exposes port 3000 (UI/API) 
+################################################################################
+
+services:
+  server:
+    build:
+      context: ../../../
+      dockerfile: deployment/docker/server/Dockerfile
+    image: docker.io/semaphoreui/semaphore:${SEMAPHORE_VERSION:-latest}
+    restart: always
+    environment:
+      # Admin user for first-time setup
+      SEMAPHORE_ADMIN_NAME:   ${SEMAPHORE_ADMIN_NAME:-Admin}
+      SEMAPHORE_ADMIN:        ${SEMAPHORE_ADMIN:-admin}
+      SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD:-p455w0rd}
+      SEMAPHORE_ADMIN_EMAIL:  ${SEMAPHORE_ADMIN_EMAIL:-admin@localhost}
+
+      # Root URL where UI & API are served
+      SEMAPHORE_WEB_ROOT:     ${SEMAPHORE_WEB_ROOT:-http://0.0.0.0:3000}
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION:-IlRqgrrO5Gp27MlWakDX1xVrPv4jhoUx+ARY+qGyDxQ=}
+
+      # Runner registration token (must match the runner service)
+      SEMAPHORE_RUNNER_REGISTRATION_TOKEN: ${SEMAPHORE_RUNNER_REGISTRATION_TOKEN:-H1wDyorbg6gTSwJlVwle2Fne}
+
+      # Database dialect & connection for the server
+      SEMAPHORE_DB_DIALECT:   postgres
+      SEMAPHORE_DB_HOST:      db
+      SEMAPHORE_DB_PORT:      5432
+      SEMAPHORE_DB_USER:      ${POSTGRES_USERNAME:-semaphore}
+      SEMAPHORE_DB_PASS:      ${POSTGRES_PASSWORD:-semaphore}
+      SEMAPHORE_DB:           ${POSTGRES_DATABASE:-semaphore}
+
+    volumes:
+      - server:/var/lib/semaphore
+      # If you want to mount a custom config.json into /etc/semaphore/config.json,
+      # uncomment the line below and ensure 'config.json' exists at:
+      #   deployment/compose/server/config.json
+      #
+      # - ${SEMAPHORE_RUNNER_LOCAL_CONFIG:-config.json}:/etc/semaphore/config.json:Z
+
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+
+
+################################################################################
+# 2. RUNNER: the Semaphore Runner service
+#
+#    - Builds from deployment/docker/runner/Dockerfile
+#    - Registers itself with the "server" using the registration token
+#    - Mounts runner.json if you want custom runner config
+################################################################################
+
+  runner:
+    build:
+      context: ../../../
+      dockerfile: deployment/docker/runner/Dockerfile
+    image: docker.io/semaphoreui/runner:${SEMAPHORE_VERSION:-latest}
+    restart: always
+    environment:
+      # Where the runner should reach the server API
+      SEMAPHORE_WEB_ROOT:             ${SEMAPHORE_WEB_ROOT:-http://server:3000}
+      SEMAPHORE_RUNNER_API_URL:       ${SEMAPHORE_RUNNER_API_URL:-http://server:3000/internal}
+
+      # Must match the same token you set under server
+      SEMAPHORE_RUNNER_REGISTRATION_TOKEN: ${SEMAPHORE_RUNNER_REGISTRATION_TOKEN:-H1wDyorbg6gTSwJlVwle2Fne}
+
+    # If you have a custom runner.json that you want to mount under /etc/semaphore/config.json,
+    # remove the leading '#' and ensure that 'runner.json' lives in deployment/compose/runner/
+    #
+    volumes:
+      - ${SEMAPHORE_RUNNER_LOCAL_CONFIG:-runner.json}:/etc/semaphore/config.json:Z
+
+    depends_on:
+      - server
+
+
+################################################################################
+# 3. DREDD: the API contract‐testing harness (optional)
+#
+#    - Builds from deployment/docker/dredd/Dockerfile
+#    - Uses one of the store backends; here, we default to PostgreSQL
+#    - Persists its data under the "dredd" volume
+################################################################################
+
+  dredd:
+    build:
+      context: ../../../
+      dockerfile: deployment/docker/dredd/Dockerfile
+    command:
+      - --config
+      - .dredd/dredd.docker.yml
+    environment:
+      # Encryption key for access tokens (same as server unless you override)
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION:-IlRqgrrO5Gp27MlWakDX1xVrPv4jhoUx+ARY+qGyDxQ=}
+
+      # Tell Dredd to use the same PostgreSQL DB as the server
+      SEMAPHORE_DB_DIALECT:   postgres
+      SEMAPHORE_DB_CONFIG:    '{"host": "db:5432","user": "semaphore","pass": "semaphore","name": "semaphore","options": {"sslmode": "disable"}}'
+    volumes:
+      - dredd:/data
+    depends_on:
+      - server
+      - postgres
+
+
+################################################################################
+# 4. POSTGRES: the database backend for both "server" and "dredd"
+#
+#    - Uses official postgres:14.3 image
+#    - Persists data under "postgres" volume
+#    - Exposes 5432 (if you ever need to connect externally)
+################################################################################
+
+  postgres:
+    image: postgres:14.3
+    restart: always
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USERNAME:-semaphore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-semaphore}
+      POSTGRES_DB:       ${POSTGRES_DATABASE:-semaphore}
+    volumes:
+      - postgres:/var/lib/postgresql
+    ports:
+      - "5432:5432"
+
